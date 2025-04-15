@@ -4,45 +4,39 @@ from unsloth import FastLanguageModel
 import torch
 from trl import SFTTrainer, SFTConfig
 from transformers import DataCollatorWithPadding
+from transformers import DataCollatorForLanguageModeling
+from datasets import load_dataset
 
 # Set maximum sequence length
 max_seq_length = 2048
 
-# Load the full curriculum dataset
-dataset_path = "/workspace/data/calendar_planner_curriculum.jsonl"
-full_dataset = Dataset.from_json(dataset_path)
 
-# Split the dataset into curriculum stages
-easy = full_dataset.filter(lambda x: x["level"] == "easy")
-medium = full_dataset.filter(lambda x: x["level"] == "medium")
-hard = full_dataset.filter(lambda x: x["level"] == "hard")
+# Load dataset
+dataset_id = "michael-sigamani/ai-planning-edge-assistant"
+train_dataset = load_dataset(dataset_id, split="train")
+val_dataset = load_dataset(dataset_id, split="validation")
 
-# Define the prompt formatting function
+
 def format_prompt(batch):
     return {
         "text": [
             f"### Instruction:\n{prompt}\n### Input:\n{input_}\n### Response:\n<think>\n{response}"
             for prompt, input_, response in zip(
-                batch.get("prompt", []),
-                batch.get("input", [""] * len(batch["prompt"])),
-                batch.get("response", [])
+                batch["prompt"],
+                batch["input"],
+                batch["response"]
             )
         ]
     }
 
-# Prepare the dataset by formatting prompts
-def prepare_dataset(dataset):
-    dataset = dataset.map(format_prompt, batched=True)
-    return dataset.remove_columns([col for col in dataset.column_names if col != "text"])
 
-# Apply prompt formatting to each curriculum stage
-easy = prepare_dataset(easy)
-medium = prepare_dataset(medium)
-hard = prepare_dataset(hard)
+train_dataset = train_dataset.map(format_prompt, batched=True).remove_columns([col for col in train_dataset.column_names if col != "text"])
+val_dataset = val_dataset.map(format_prompt, batched=True).remove_columns([col for col in val_dataset.column_names if col != "text"])
+
 
 # Load the model and tokenizer using Unsloth's FastLanguageModel
 model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name="unsloth/llama-3.1-8B",
+    model_name="unsloth/llama-3.1-8B-Instruct",  # 👈 switch to instruct
     max_seq_length=max_seq_length,
     load_in_4bit=True,
     load_in_8bit=False,
@@ -62,6 +56,10 @@ model = FastLanguageModel.get_peft_model(
     random_state=3407,
 )
 
+
+
+
+# Tokenization
 def tokenize(batch):
     tokens = tokenizer(
         batch["text"],
@@ -73,45 +71,37 @@ def tokenize(batch):
     return tokens
 
 
-# Define the tokenization and label assignment function
-def tokenize_and_add_labels(dataset):
-    return dataset.map(tokenize, batched=True)
+train_dataset = train_dataset.map(tokenize, batched=True)
+val_dataset = val_dataset.map(tokenize, batched=True)
 
-# Tokenize and add labels to each curriculum stage
-easy = tokenize_and_add_labels(easy)
-medium = tokenize_and_add_labels(medium)
-hard = tokenize_and_add_labels(hard)
 
-# Combine the curriculum stages into a single dataset
-full_dataset = concatenate_datasets([easy, medium, hard])
+collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
-# Initialize the data collator
-#collator = DataCollatorWithPadding(tokenizer=tokenizer, padding=True)
-
-from transformers import DataCollatorForLanguageModeling
-
-collator = DataCollatorForLanguageModeling(
-    tokenizer=tokenizer,
-    mlm=False,  # For causal language models
-)
+# Init wandb
+wandb.init(project="calendar-scheduler-finetune", name="deepseek-r1:8b")
 
 # Set up the trainer configuration
 trainer = SFTTrainer(
     model=model,
     tokenizer=tokenizer,
-    train_dataset=full_dataset,
+    train_dataset=train_dataset,
+    eval_dataset=val_dataset,
     args=SFTConfig(
         dataset_text_field="text",
         max_seq_length=max_seq_length,
         per_device_train_batch_size=2,
         gradient_accumulation_steps=4,
         warmup_steps=10,
-        max_steps=150,
+        max_steps=300,
+        eval_steps=50,
+        save_steps=50,
         logging_steps=1,
+        evaluation_strategy="steps",
+        save_strategy="steps",
         output_dir="outputs",
         optim="adamw_8bit",
         seed=3407,
-    ),
+        ),
     data_collator=collator,
 )
 
