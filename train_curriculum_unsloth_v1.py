@@ -62,25 +62,20 @@ model = FastLanguageModel.get_peft_model(
     random_state=3407,
 )
 
-def tokenize(example):
+def tokenize(batch):
     tokens = tokenizer(
-        example["text"],
+        batch["text"],
         truncation=True,
-        padding="max_length",  # or False if using dynamic padding
+        padding="max_length",
         max_length=max_seq_length,
-        return_tensors="pt"
     )
     tokens["labels"] = tokens["input_ids"].copy()
     return tokens
 
+
 # Define the tokenization and label assignment function
 def tokenize_and_add_labels(dataset):
-    tokenized = dataset.map(
-        lambda x: tokenize(x["text"]),
-        batched=True,
-    )
-    tokenized = tokenized.map(lambda x: {"labels": x["input_ids"]}, batched=True)
-    return tokenized
+    return dataset.map(tokenize, batched=True)
 
 # Tokenize and add labels to each curriculum stage
 easy = tokenize_and_add_labels(easy)
