@@ -6,7 +6,7 @@ from trl import SFTTrainer, SFTConfig
 import wandb
 
 # --- Config ---
-dataset_id = "michael-sigamani/ai-planning-edge-assistant"
+train_file = "final_train_cot_v3_alpaca_fixed.jsonl"
 model_name = "unsloth/llama-3.1-8B-instruct"
 max_seq_length = 2048
 batch_size = 2
@@ -18,21 +18,26 @@ logging_steps = 1
 output_dir = "outputs"
 project_name = "edge-planner"
 
-import pandas as pd
-# --- Load Datasets ---
-train_dataset = pd.loadload_dataset(dataset_id, split="train")
-eval_dataset = load_dataset(dataset_id, split="validation")
+# --- Load Local Dataset ---
+dataset = load_dataset("json", data_files={"train": train_file})
+train_dataset = dataset["train"]
 
-# --- Sanity check: should contain only 'text' field ---
+# --- Optional: Split into train/val ---
+train_dataset = train_dataset.train_test_split(test_size=0.1, seed=42)
+eval_dataset = train_dataset["test"]
+train_dataset = train_dataset["train"]
+
+# --- Sanity check ---
 assert "text" in train_dataset.column_names, "Expected 'text' column in dataset"
 
 # --- Load Model & Tokenizer ---
 model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name=model_name,
+    model_name="llama-3.1-8b-instruct",
     max_seq_length=max_seq_length,
     load_in_4bit=True,
     load_in_8bit=False,
-    full_finetuning=False
+    full_finetuning=False,
+
 )
 
 # --- Patch for LoRA ---
@@ -66,34 +71,34 @@ eval_dataset = eval_dataset.map(tokenize, batched=True)
 collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
 # --- W&B Login ---
-import wandb
-wandb.init(project="agentic-planner-8b")
+wandb.init(project=project_name)
 
 # --- Trainer ---
 trainer = SFTTrainer(
     model=model,
     tokenizer=tokenizer,
     train_dataset=train_dataset,
-    eval_dataset=eval_dataset,                # ✅ Pass here
+    eval_dataset=eval_dataset,
     data_collator=collator,
     args=SFTConfig(
         dataset_text_field="text",
-        output_dir="outputs2",
+        output_dir=output_dir,
         max_seq_length=max_seq_length,
-        per_device_train_batch_size=2,
-        gradient_accumulation_steps=4,
+        per_device_train_batch_size=batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
         warmup_steps=10,
-        max_steps=150,
-        logging_steps=1,
-        save_steps=50,
-        eval_steps=50,                      # ✅ Also here, not in `evaluation_strategy`
+        max_steps=total_steps,
+        logging_steps=logging_steps,
+        save_steps=save_steps,
+        eval_steps=eval_steps,
         optim="adamw_8bit",
         seed=3407,
-        report_to="wandb",  
+        report_to="wandb",
         run_name="llama-calendar-scheduler",
-        bf16=True if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8 else False,
+        bf16=torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8,
     ),
 )
 
 # --- Train ---
 trainer.train()
+
